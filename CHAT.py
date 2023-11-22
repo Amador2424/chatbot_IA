@@ -4,7 +4,7 @@ import streamlit as st
 from streamlit_chat import message
 st.set_page_config(page_title="Tec-GPT",page_icon=":books:",layout="wide")
  
-openai.api_key = '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'
+openai.api_key = 'your openAI key api'
  
 def generate_response(user_input):
     completions = openai.Completion.create(
