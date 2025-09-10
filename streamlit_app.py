@@ -10,13 +10,26 @@ from streamlit_chat import message
 
 st.set_page_config(page_title="Chat-PDF", page_icon="📄", layout="wide")
 
-# --- Configuration clés / modèles
-OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY", None)
-if OPENAI_API_KEY:
-    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY
+# 1) Charger .env en local
+load_dotenv()
 
-LLM_MODEL = st.secrets.get("OPENAI_MODEL", "gpt-4o-mini")  # modifiable via secrets
+# 2) Lire d'abord Streamlit Secrets (Cloud), sinon .env (local)
+OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = (
+    st.secrets.get("OPENAI_MODEL")
+    or os.getenv("OPENAI_MODEL")
+    or "gpt-4o-mini"            # fallback par défaut
+)
+OPENAI_EMBEDDING_MODEL = (
+    st.secrets.get("OPENAI_EMBEDDING_MODEL")
+    or os.getenv("OPENAI_EMBEDDING_MODEL")
+    or "text-embedding-3-small" # fallback embeddings
+)
 
+# 3) Sécuriser: arrêter si la clé est absente
+if not OPENAI_API_KEY:
+    st.error("OPENAI_API_KEY manquante. Ajoute-la soit dans .env (local) soit dans Settings → Secrets (Cloud).")
+    st.stop()
 # --- Helpers
 def extract_chunks_from_pdfs(pdf_docs):
     """Lit les PDFs, agrège le texte et crée des chunks."""
