@@ -1,5 +1,6 @@
 import os
 import streamlit as st
+from dotenv import load_dotenv  # ✅ manquait
 from PyPDF2 import PdfReader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.memory import ConversationBufferMemory
@@ -13,23 +14,24 @@ st.set_page_config(page_title="Chat-PDF", page_icon="📄", layout="wide")
 # 1) Charger .env en local
 load_dotenv()
 
-# 2) Lire d'abord Streamlit Secrets (Cloud), sinon .env (local)
+# 2) Secrets (Cloud) puis .env (local)
 OPENAI_API_KEY = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = (
     st.secrets.get("OPENAI_MODEL")
     or os.getenv("OPENAI_MODEL")
-    or "gpt-4o-mini"            # fallback par défaut
+    or "gpt-4o-mini"
 )
 OPENAI_EMBEDDING_MODEL = (
     st.secrets.get("OPENAI_EMBEDDING_MODEL")
     or os.getenv("OPENAI_EMBEDDING_MODEL")
-    or "text-embedding-3-small" # fallback embeddings
+    or "text-embedding-3-small"
 )
 
-# 3) Sécuriser: arrêter si la clé est absente
+# 3) Sécuriser
 if not OPENAI_API_KEY:
-    st.error("OPENAI_API_KEY manquante. Ajoute-la soit dans .env (local) soit dans Settings → Secrets (Cloud).")
+    st.error("OPENAI_API_KEY manquante. Ajoute-la dans .env (local) ou Settings → Secrets (Cloud).")
     st.stop()
+
 # --- Helpers
 def extract_chunks_from_pdfs(pdf_docs):
     """Lit les PDFs, agrège le texte et crée des chunks."""
@@ -54,12 +56,12 @@ def extract_chunks_from_pdfs(pdf_docs):
 
 def create_vectorstore(chunks):
     """Crée un index FAISS en mémoire à partir des chunks."""
-    embeddings = OpenAIEmbeddings(api_key=OPENAI_API_KEY)
+    embeddings = OpenAIEmbeddings(api_key=OPENAI_API_KEY, model=OPENAI_EMBEDDING_MODEL)
     return FAISS.from_texts(texts=chunks, embedding=embeddings)
 
 def build_conversation_chain(vectorstore):
     """Chaîne conversationnelle avec mémoire + retrieval FAISS."""
-    llm = ChatOpenAI(api_key=OPENAI_API_KEY, model=LLM_MODEL, temperature=0.2)
+    llm = ChatOpenAI(api_key=OPENAI_API_KEY, model=OPENAI_MODEL, temperature=0.2)  # ✅ OPENAI_MODEL
     memory = ConversationBufferMemory(
         memory_key="chat_history",
         return_messages=True
@@ -74,10 +76,8 @@ def handle_user_question(user_text):
     if not st.session_state.get("pdf_ready", False):
         st.info("📥 Importez des PDF puis cliquez sur **Extraction**.")
         return
-
     if not user_text.strip():
         return
-
     try:
         result = st.session_state.conversation({"question": user_text})
         st.session_state.chat_history = result["chat_history"]
@@ -116,7 +116,7 @@ with st.sidebar:
 
     if st.button("Extraction"):
         if not OPENAI_API_KEY:
-            st.error("Ajoutez votre **OPENAI_API_KEY** dans *Settings → Secrets*.")
+            st.error("Ajoutez votre **OPENAI_API_KEY** dans *Settings → Secrets* ou .env.")
         elif not pdf_docs:
             st.warning("Veuillez importer au moins un PDF.")
         else:
@@ -133,7 +133,7 @@ with st.sidebar:
                 except Exception as e:
                     st.error(f"Échec de l'indexation : {e}")
 
-# Affichage du chat existant (si on recharge la page)
+# Affichage de l'historique si présent
 if st.session_state.chat_history:
     st.markdown("---")
     st.subheader("Historique")
