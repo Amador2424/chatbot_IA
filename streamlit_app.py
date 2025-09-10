@@ -13,7 +13,7 @@ st.set_page_config(page_title="Chat-PDF", page_icon="📄", layout="wide")
 
 # ⚠️ Clé + Project ID en dur (pas recommandé)
 OPENAI_API_KEY = "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"
-OPENAI_PROJECT = "proj_xxxxxxxxxxxxxxxxx"   # <-- mets ton vrai Project ID ici
+OPENAI_PROJECT = "proj_MpAHQtSkHp1U1SHeD0nR8TUO"   # <-- mets ton vrai Project ID ici
 OPENAI_MODEL = "gpt-4o-mini"
 OPENAI_EMBED_MODEL = "text-embedding-3-small"
 
