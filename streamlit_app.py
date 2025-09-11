@@ -109,7 +109,7 @@ def answer_with_context(question, context_chunks):
 # =========================
 #   UI STREAMLIT
 # =========================
-st.title("📄 Chat avec vos PDF (OpenAI SDK + FAISS)")
+st.title("📄 Chat avec vos PDF oui (OpenAI SDK + FAISS)")
 st.caption("Upload des PDF → extraction du texte → embeddings → questions/réponses.")
 
 if "pdf_ready" not in st.session_state:
