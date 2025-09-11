@@ -6,7 +6,7 @@
     }
   },
   "routes": [
-    { "src": "/ask", "dest": "/app.py" },
-    { "src": "/(.*)", "dest": "/app.py" }
+    { "src": "/ask", "dest": "/index.py" },
+    { "src": "/(.*)", "dest": "/index.py" }
   ]
 }
