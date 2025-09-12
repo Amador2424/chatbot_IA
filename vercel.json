@@ -1,12 +1,6 @@
 {
-  "functions": {
-    "app.py": {
-      "runtime": "python3.11",
-      "maxDuration": 60
-    }
-  },
-  "routes": [
-    { "src": "/ask", "dest": "/index.py" },
-    { "src": "/(.*)", "dest": "/index.py" }
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/", "destination": "/api" }
   ]
 }
