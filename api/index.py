@@ -189,3 +189,7 @@ async def ask(
         return page(chunks_count=len(chunks), answer=ans)
     except Exception as e:
         return page(error=f"Erreur : {e}")
+
+    except Exception as e:
+        return page(error=f"Erreur : {e}")
+
