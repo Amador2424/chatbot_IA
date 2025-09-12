@@ -6,7 +6,7 @@ import streamlit as st
 from PyPDF2 import PdfReader
 from openai import OpenAI
 
-# =========================
+# ========================= 
 #   CONFIG
 # =========================
 st.set_page_config(page_title="Chat-PDF", page_icon="📄", layout="wide")
