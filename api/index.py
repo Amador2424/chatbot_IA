@@ -46,7 +46,7 @@ HTML_PAGE = """<!doctype html>
   <h1>📄 Chat-PDF — Vercel (FastAPI, 1 fichier, sans NumPy)</h1>
   <p class="muted">Importe 1..N PDF et pose une question. Réponse basée sur les passages les plus pertinents.</p>
 
-  <form method="post" action="/api/ask" enctype="multipart/form-data" class="row">
+  <form method="post" action="/api/index/ask" enctype="multipart/form-data" class="row">
     <label>
       <div>PDF(s) :</div>
       <input name="files" type="file" accept="application/pdf" multiple required />
