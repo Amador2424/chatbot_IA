@@ -27,7 +27,7 @@ HTML_PAGE = """<!doctype html>
 <html lang="fr">
 <head>
   <meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Chat-PDF (Vercel, sans NumPy)</title>
+  <title>Chat-PDF (Vercel)</title>
   <style>
     body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:24px;max-width:960px}
     form{border:1px solid #e5e7eb;padding:16px;border-radius:12px}
@@ -43,10 +43,11 @@ HTML_PAGE = """<!doctype html>
   </style>
 </head>
 <body>
-  <h1>📄 Chat-PDF — Vercel (FastAPI, 1 fichier, sans NumPy)</h1>
+  <h1>📄 Chat-PDF — Vercel (FastAPI, 1 fichier)</h1>
   <p class="muted">Importe 1..N PDF et pose une question. Réponse basée sur les passages les plus pertinents.</p>
 
-  <form method="post" action="/api/index/ask" enctype="multipart/form-data" class="row">
+  <!-- ⚠️ IMPORTANT: action RELATIVE (pas de / au début) -->
+  <form method="post" action="ask" enctype="multipart/form-data" class="row">
     <label>
       <div>PDF(s) :</div>
       <input name="files" type="file" accept="application/pdf" multiple required />
@@ -62,10 +63,12 @@ HTML_PAGE = """<!doctype html>
 
   {status_block}
   {result_block}
+
+  <p class="muted">Debug: <a href="routes">/routes</a> • <a href="health">/health</a></p>
 </body>
 </html>"""
 
-def page(status: str = "", chunks_count: int | None = None, answer: str | None = None, error: str | None = None):
+def page(chunks_count: int | None = None, answer: str | None = None, error: str | None = None):
     blocks = []
     if chunks_count is not None:
         blocks.append(f'<div class="ok">Indexation : {chunks_count} segments.</div>')
@@ -129,9 +132,7 @@ def embed_texts(texts: List[str], batch_size: int = 80, pause_s: float = 0.0) ->
 def top_k_context(question: str, chunks: List[str], emb_matrix: List[List[float]], k: int = 4) -> List[str]:
     q = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=[question]).data[0].embedding
     qn = normalize(q)
-    # pré-normaliser les embeddings des chunks
     normed = [normalize(vec) for vec in emb_matrix]
-    # top-k via un min-heap
     heap = []  # (score, idx)
     for idx, vec in enumerate(normed):
         score = dot(qn, vec)  # cos θ
@@ -140,7 +141,6 @@ def top_k_context(question: str, chunks: List[str], emb_matrix: List[List[float]
         else:
             if score > heap[0][0]:
                 heapq.heapreplace(heap, (score, idx))
-    # du meilleur au moins bon
     top = sorted(heap, key=lambda x: -x[0])
     return [chunks[i] for _, i in top]
 
@@ -159,12 +159,21 @@ def answer_with_context(question: str, context_chunks: List[str]) -> str:
     return resp.choices[0].message.content
 
 # ========== Routes ==========
+@app.get("/health", response_class=HTMLResponse)
+async def health(_: Request):
+    return HTMLResponse("OK")
+
+@app.get("/routes", response_class=HTMLResponse)
+async def routes(_: Request):
+    rows = [f"{r.path} — {','.join(sorted(r.methods or []))}" for r in app.router.routes]
+    return HTMLResponse("<br>".join(rows))
+
 @app.get("/", response_class=HTMLResponse)
 async def home(_: Request):
     if not OPENAI_API_KEY:
         return page(error="OPENAI_API_KEY manquante (Vercel → Settings → Environment Variables).")
     if OPENAI_API_KEY.startswith("sk-proj-") and not OPENAI_PROJECT:
-        return page(error="Clé `sk-proj-…` détectée : ajoute aussi OPENAI_PROJECT=proj_xxx dans les variables d'env.")
+        return page(error="Clé `sk-proj-…` détectée : ajoute aussi OPENAI_PROJECT=proj_xxx.")
     return page()
 
 @app.post("/ask", response_class=HTMLResponse)
@@ -173,23 +182,30 @@ async def ask(
     question: str = Form(...),
     files: List[UploadFile] = File(...)
 ):
-    if not OPENAI_API_KEY:
-        return page(error="OPENAI_API_KEY manquante.")
-    if OPENAI_API_KEY.startswith("sk-proj-") and not OPENAI_PROJECT:
-        return page(error="Clé `sk-proj-…` sans OPENAI_PROJECT=proj_xxx.")
-
     try:
+        if not OPENAI_API_KEY:
+            return page(error="OPENAI_API_KEY manquante.")
+        if OPENAI_API_KEY.startswith("sk-proj-") and not OPENAI_PROJECT:
+            return page(error="Clé `sk-proj-…` sans OPENAI_PROJECT=proj_xxx.")
+
+        # Anti 413 (~5MB)
+        total_size = 0
+        for f in files:
+            data = f.file.read()
+            f.file.seek(0)
+            total_size += len(data)
+        if total_size > 4_900_000:
+            return page(error="Fichiers trop volumineux pour Vercel (≈5MB max). Teste avec un PDF plus léger.")
+
         text = read_pdfs(files)
         chunks = chunk_text(text)
         if not chunks:
             return page(chunks_count=0, error="Aucun texte exploitable trouvé dans les PDF.")
+
         emb_matrix = embed_texts(chunks, batch_size=60)
         ctx = top_k_context(question, chunks, emb_matrix, k=4)
         ans = answer_with_context(question, ctx)
         return page(chunks_count=len(chunks), answer=ans)
-    except Exception as e:
-        return page(error=f"Erreur : {e}")
 
     except Exception as e:
-        return page(error=f"Erreur : {e}")
-
+        return page(error=f"Erreur serveur : {e}")
