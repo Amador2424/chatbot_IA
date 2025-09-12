@@ -3,7 +3,7 @@ from typing import List
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 from openai import OpenAI
-from PyPDF2 import PdfReader
+from pypdf import PdfReader
 
 # ====== Config via variables d'env (Vercel → Settings → Environment Variables) ======
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
