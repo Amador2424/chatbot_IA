@@ -1,9 +1,19 @@
-import os, io, time, math, heapq
-from typing import List
+import os
+import io
+import time
+import math
+import heapq
+import logging
+from typing import List, Optional
+
 from fastapi import FastAPI, Request, UploadFile, File, Form
 from fastapi.responses import HTMLResponse
 from openai import OpenAI
 from pypdf import PdfReader
+
+# ----- Logging simple -----
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # ====== Config via variables d'env (Vercel → Settings → Environment Variables) ======
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -68,30 +78,36 @@ HTML_PAGE = """<!doctype html>
 </body>
 </html>"""
 
-def page(chunks_count: int | None = None, answer: str | None = None, error: str | None = None):
+def page(chunks_count: Optional[int] = None, answer: Optional[str] = None, error: Optional[str] = None):
     blocks = []
     if chunks_count is not None:
         blocks.append(f'<div class="ok">Indexation : {chunks_count} segments.</div>')
     if error:
         blocks.append(f'<div class="err">{error}</div>')
     status_block = "".join(blocks)
-    result_block = f'<div class="card"><b>Réponse :</b>\\n\\n{answer}</div>' if answer else ""
+    result_block = f'<div class="card"><b>Réponse :</b>\n\n{answer}</div>' if answer else ""
     return HTMLResponse(HTML_PAGE.replace("{status_block}", status_block).replace("{result_block}", result_block))
 
 # ========== Helpers PDF/Chunks ==========
-def read_pdfs(files: List[UploadFile]) -> str:
+# Lire les UploadFile de manière asynchrone (FastAPI UploadFile) et retourner le texte complet
+async def read_pdfs(files: List[UploadFile]) -> str:
     txt = ""
     for uf in files:
-        data = uf.file.read()
-        uf.file.seek(0)
-        reader = PdfReader(io.BytesIO(data))
-        for page in reader.pages:
-            txt += page.extract_text() or ""
+        try:
+            data = await uf.read()
+            # on peut fermer le fichier pour libérer la ressource
+            await uf.close()
+            reader = PdfReader(io.BytesIO(data))
+            for page in reader.pages:
+                txt += page.extract_text() or ""
+        except Exception as e:
+            logger.exception("Erreur lecture PDF: %s", e)
     return txt
 
 def chunk_text(text: str, chunk_size: int = 1400, overlap: int = 320) -> List[str]:
     paragraphs = (text or "").replace("\r", "\n").split("\n")
-    chunks, cur = [], ""
+    chunks: List[str] = []
+    cur = ""
     for p in paragraphs:
         p = p.strip()
         if not p:
@@ -101,28 +117,33 @@ def chunk_text(text: str, chunk_size: int = 1400, overlap: int = 320) -> List[st
         else:
             if cur:
                 chunks.append(cur)
-            tail = cur[-overlap:] if overlap > 0 else ""
+            # build next current with overlap from previous 'cur' if possible
+            tail = cur[-overlap:] if overlap > 0 and len(cur) > overlap else cur
             cur = (tail + "\n" + p).strip()
     if cur:
         chunks.append(cur)
+    # nettoyer les chunks vides
     return [c for c in chunks if c.strip()]
 
-# ========== Embeddings & Cosine (pur Python) ==========
+# ========== Embeddings & Cosine (pure Python) ==========
 def l2_norm(v: List[float]) -> float:
-    return math.sqrt(sum(x*x for x in v)) or 1e-12
+    s = sum(x * x for x in v)
+    return math.sqrt(s) if s > 0 else 1e-12
 
 def normalize(v: List[float]) -> List[float]:
     n = l2_norm(v)
     return [x / n for x in v]
 
 def dot(a: List[float], b: List[float]) -> float:
-    return sum(x*y for x, y in zip(a, b))
+    return sum(x * y for x, y in zip(a, b))
 
 def embed_texts(texts: List[str], batch_size: int = 80, pause_s: float = 0.0) -> List[List[float]]:
     vecs: List[List[float]] = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
+        # create embeddings (synchronous call to OpenAI client)
         resp = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=batch)
+        # resp.data expected to be a list of items with .embedding
         for item in resp.data:
             vecs.append(item.embedding)
         if pause_s > 0:
@@ -130,15 +151,20 @@ def embed_texts(texts: List[str], batch_size: int = 80, pause_s: float = 0.0) ->
     return vecs
 
 def top_k_context(question: str, chunks: List[str], emb_matrix: List[List[float]], k: int = 4) -> List[str]:
-    q = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=[question]).data[0].embedding
+    if not emb_matrix:
+        return []
+    # obtenir embedding de la question
+    q_resp = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=[question])
+    q = q_resp.data[0].embedding
     qn = normalize(q)
     normed = [normalize(vec) for vec in emb_matrix]
-    heap = []  # (score, idx)
+    heap = []  # min-heap of (score, idx)
     for idx, vec in enumerate(normed):
-        score = dot(qn, vec)  # cos θ
+        score = dot(qn, vec)
         if len(heap) < k:
             heapq.heappush(heap, (score, idx))
         else:
+            # heap[0] est la plus petite score du heap
             if score > heap[0][0]:
                 heapq.heapreplace(heap, (score, idx))
     top = sorted(heap, key=lambda x: -x[0])
@@ -151,36 +177,61 @@ def answer_with_context(question: str, context_chunks: List[str]) -> str:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Contexte:\n{joined}\n\nQuestion: {question}"},
     ]
+    # Appel au chat (OpenAI client); on gère les variations possibles de structure de réponse
     resp = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,
         temperature=0.2,
     )
-    return resp.choices[0].message.content
+    # tentative robuste d'extraction du texte de la réponse
+    try:
+        choice = resp.choices[0]
+        # certains SDK renvoient choice.message.content ou choice.message['content']
+        content = None
+        if hasattr(choice, "message"):
+            msg = choice.message
+            # si message est un dict-like
+            if isinstance(msg, dict):
+                content = msg.get("content")
+            else:
+                # objet avec attributs
+                content = getattr(msg, "content", None)
+        # fallback : essayer choice.text (anciens endpoints)
+        if not content:
+            content = getattr(choice, "text", None)
+        return content or ""
+    except Exception as e:
+        logger.exception("Erreur parsing LLM response: %s", e)
+        return ""
 
 # ========== Routes ==========
 @app.get("/health", response_class=HTMLResponse)
-async def health(_: Request):
+async def health(request: Request):
     return HTMLResponse("OK")
 
 @app.get("/routes", response_class=HTMLResponse)
-async def routes(_: Request):
-    rows = [f"{r.path} — {','.join(sorted(r.methods or []))}" for r in app.router.routes]
+async def routes(request: Request):
+    rows = []
+    for r in app.router.routes:
+        methods = sorted(list(r.methods)) if getattr(r, "methods", None) else []
+        rows.append(f"{getattr(r, 'path', str(r))} — {', '.join(methods)}")
     return HTMLResponse("<br>".join(rows))
 
 @app.get("/", response_class=HTMLResponse)
-async def home(_: Request):
+async def home(request: Request):
     if not OPENAI_API_KEY:
         return page(error="OPENAI_API_KEY manquante (Vercel → Settings → Environment Variables).")
     if OPENAI_API_KEY.startswith("sk-proj-") and not OPENAI_PROJECT:
         return page(error="Clé `sk-proj-…` détectée : ajoute aussi OPENAI_PROJECT=proj_xxx.")
     return page()
 
+MAX_TOTAL_BYTES = 4_900_000  # ~4.9MB
+
 @app.post("/ask", response_class=HTMLResponse)
 async def ask(
     request: Request,
     question: str = Form(...),
-    files: List[UploadFile] = File(...)
+    files: List[UploadFile] = File(...),
 ):
     try:
         if not OPENAI_API_KEY:
@@ -188,16 +239,27 @@ async def ask(
         if OPENAI_API_KEY.startswith("sk-proj-") and not OPENAI_PROJECT:
             return page(error="Clé `sk-proj-…` sans OPENAI_PROJECT=proj_xxx.")
 
-        # Anti 413 (~5MB)
+        # Vérifier taille totale (asynchrone read)
         total_size = 0
+        file_bytes_list: List[bytes] = []
         for f in files:
-            data = f.file.read()
-            f.file.seek(0)
-            total_size += len(data)
-        if total_size > 4_900_000:
+            b = await f.read()
+            file_bytes_list.append(b)
+            total_size += len(b)
+            await f.close()
+        if total_size > MAX_TOTAL_BYTES:
             return page(error="Fichiers trop volumineux pour Vercel (≈5MB max). Teste avec un PDF plus léger.")
 
-        text = read_pdfs(files)
+        # Construire texte des PDFs
+        text = ""
+        for b in file_bytes_list:
+            try:
+                reader = PdfReader(io.BytesIO(b))
+                for page in reader.pages:
+                    text += page.extract_text() or ""
+            except Exception as e:
+                logger.exception("Erreur parsing PDF in ask(): %s", e)
+
         chunks = chunk_text(text)
         if not chunks:
             return page(chunks_count=0, error="Aucun texte exploitable trouvé dans les PDF.")
@@ -208,4 +270,5 @@ async def ask(
         return page(chunks_count=len(chunks), answer=ans)
 
     except Exception as e:
+        logger.exception("Erreur serveur: %s", e)
         return page(error=f"Erreur serveur : {e}")
