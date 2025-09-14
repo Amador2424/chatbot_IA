@@ -1,4 +1,3 @@
-# api/index.py
 import os
 import io
 import time
@@ -16,9 +15,9 @@ from pypdf import PdfReader
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ====== Config via variables d'env (Vercel → Settings → Environment Variables) ======
+# ====== Config via variables d'env ======
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_PROJECT = os.getenv("OPENAI_PROJECT", "")  # requis si ta clé commence par sk-proj-...
+OPENAI_PROJECT = os.getenv("OPENAI_PROJECT", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
@@ -57,8 +56,8 @@ HTML_PAGE = """<!doctype html>
   <h1>📄 Chat-PDF — Vercel (FastAPI, 1 fichier)</h1>
   <p class="muted">Importe 1..N PDF et pose une question. Réponse basée sur les passages les plus pertinents.</p>
 
-  <!-- action absolue vers la fonction serverless (api/) -->
-  <form method="post" action="/api/ask" enctype="multipart/form-data" class="row">
+  <!-- Formulaire postant vers la même URL -->
+  <form method="post" enctype="multipart/form-data" class="row">
     <label>
       <div>PDF(s) :</div>
       <input name="files" type="file" accept="application/pdf" multiple required />
@@ -66,7 +65,7 @@ HTML_PAGE = """<!doctype html>
 
     <label>
       <div>Question :</div>
-      <textarea name="question" placeholder="Ex. Résume les conclusions et liste 3 actions clés." required></textarea>
+      <textarea name="question" placeholder="Ex. Résume les conclusions et liste 3 actions clés." required>{question_value}</textarea>
     </label>
 
     <button type="submit">Analyser & Répondre</button>
@@ -75,11 +74,11 @@ HTML_PAGE = """<!doctype html>
   {status_block}
   {result_block}
 
-  <p class="muted">Debug: <a href="/api/routes">/api/routes</a> • <a href="/api/health">/api/health</a></p>
+  <p class="muted">Debug: <a href="/api/health">/api/health</a> • <a href="/api/routes">/api/routes</a></p>
 </body>
 </html>"""
 
-def page(chunks_count: Optional[int] = None, answer: Optional[str] = None, error: Optional[str] = None):
+def page(question_value: str = "", chunks_count: Optional[int] = None, answer: Optional[str] = None, error: Optional[str] = None):
     blocks = []
     if chunks_count is not None:
         blocks.append(f'<div class="ok">Indexation : {chunks_count} segments.</div>')
@@ -87,7 +86,7 @@ def page(chunks_count: Optional[int] = None, answer: Optional[str] = None, error
         blocks.append(f'<div class="err">{error}</div>')
     status_block = "".join(blocks)
     result_block = f'<div class="card"><b>Réponse :</b>\n\n{answer}</div>' if answer else ""
-    return HTMLResponse(HTML_PAGE.replace("{status_block}", status_block).replace("{result_block}", result_block))
+    return HTML_PAGE.replace("{question_value}", question_value).replace("{status_block}", status_block).replace("{result_block}", result_block)
 
 # ========== Helpers PDF/Chunks ==========
 def chunk_text(text: str, chunk_size: int = 1400, overlap: int = 320) -> List[str]:
@@ -109,7 +108,7 @@ def chunk_text(text: str, chunk_size: int = 1400, overlap: int = 320) -> List[st
         chunks.append(cur)
     return [c for c in chunks if c.strip()]
 
-# ========== Embeddings & Cosine (pure Python) ==========
+# ========== Embeddings & Cosine ==========
 def l2_norm(v: List[float]) -> float:
     s = sum(x * x for x in v)
     return math.sqrt(s) if s > 0 else 1e-12
@@ -163,54 +162,45 @@ def answer_with_context(question: str, context_chunks: List[str]) -> str:
         temperature=0.2,
     )
     try:
-        choice = resp.choices[0]
-        content = None
-        if hasattr(choice, "message"):
-            msg = choice.message
-            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", None)
-        if not content:
-            content = getattr(choice, "text", None)
-        return content or ""
+        return resp.choices[0].message.content or ""
     except Exception as e:
         logger.exception("Erreur parsing LLM response: %s", e)
         return ""
 
 # ========== Routes ==========
-@app.get("/health", response_class=HTMLResponse)
-async def health(_: Request):
-    return HTMLResponse("OK")
+@app.get("/api/health")
+async def health():
+    return "OK"
 
-@app.get("/routes", response_class=HTMLResponse)
-async def routes(_: Request):
+@app.get("/api/routes")
+async def routes():
     rows = []
     for r in app.router.routes:
         methods = sorted(list(r.methods)) if getattr(r, "methods", None) else []
         rows.append(f"{getattr(r, 'path', str(r))} — {', '.join(methods)}")
     return HTMLResponse("<br>".join(rows))
 
+MAX_TOTAL_BYTES = 4_900_000
+
 @app.get("/", response_class=HTMLResponse)
-async def home(_: Request):
+@app.post("/", response_class=HTMLResponse)
+async def home(request: Request, files: List[UploadFile] = File(None), question: str = Form("")):
+    # Vérification des clés API
     if not OPENAI_API_KEY:
-        return page(error="OPENAI_API_KEY manquante (Vercel → Settings → Environment Variables).")
+        return page(error="OPENAI_API_KEY manquante.")
     if OPENAI_API_KEY.startswith("sk-proj-") and not OPENAI_PROJECT:
-        return page(error="Clé `sk-proj-…` détectée : ajoute aussi OPENAI_PROJECT=proj_xxx.")
-    return page()
+        return page(error="Clé `sk-proj-…` sans OPENAI_PROJECT=proj_xxx.")
 
-MAX_TOTAL_BYTES = 4_900_000  # ~4.9MB
+    # Si méthode GET, afficher le formulaire vide
+    if request.method == "GET":
+        return page()
 
-@app.post("/ask", response_class=HTMLResponse)
-async def ask(
-    request: Request,
-    question: str = Form(...),
-    files: List[UploadFile] = File(...),
-):
     try:
-        if not OPENAI_API_KEY:
-            return page(error="OPENAI_API_KEY manquante.")
-        if OPENAI_API_KEY.startswith("sk-proj-") and not OPENAI_PROJECT:
-            return page(error="Clé `sk-proj-…` sans OPENAI_PROJECT=proj_xxx.")
+        # Vérification des fichiers
+        if not files:
+            return page(question_value=question, error="Veuillez sélectionner au moins un fichier PDF.")
 
-        # Lecture asynchrone des fichiers + check taille
+        # Lecture des fichiers
         total_size = 0
         file_bytes_list: List[bytes] = []
         for f in files:
@@ -220,9 +210,9 @@ async def ask(
             await f.close()
 
         if total_size > MAX_TOTAL_BYTES:
-            return page(error="Fichiers trop volumineux pour Vercel (≈5MB max). Teste avec un PDF plus léger.")
+            return page(question_value=question, error="Fichiers trop volumineux pour Vercel (≈5MB max).")
 
-        # Extraction du texte depuis les PDFs
+        # Extraction du texte
         text = ""
         for b in file_bytes_list:
             try:
@@ -234,13 +224,14 @@ async def ask(
 
         chunks = chunk_text(text)
         if not chunks:
-            return page(chunks_count=0, error="Aucun texte exploitable trouvé dans les PDF.")
+            return page(question_value=question, chunks_count=0, error="Aucun texte exploitable trouvé dans les PDF.")
 
+        # Génération des embeddings et réponse
         emb_matrix = embed_texts(chunks, batch_size=60)
         ctx = top_k_context(question, chunks, emb_matrix, k=4)
         ans = answer_with_context(question, ctx)
-        return page(chunks_count=len(chunks), answer=ans)
+        return page(question_value=question, chunks_count=len(chunks), answer=ans)
 
     except Exception as e:
         logger.exception("Erreur serveur: %s", e)
-        return page(error=f"Erreur serveur : {e}")
+        return page(question_value=question, error=f"Erreur serveur : {e}")
