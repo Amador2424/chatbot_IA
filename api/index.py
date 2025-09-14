@@ -17,14 +17,11 @@ logger = logging.getLogger(__name__)
 
 # ====== Config via variables d'env ======
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_PROJECT = os.getenv("OPENAI_PROJECT", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
-client_kwargs = {"api_key": OPENAI_API_KEY}
-if OPENAI_PROJECT:
-    client_kwargs["project"] = OPENAI_PROJECT
-client = OpenAI(**client_kwargs)
+# Configuration simplifiée du client OpenAI
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 app = FastAPI()
 
@@ -86,7 +83,7 @@ def page(question_value: str = "", chunks_count: Optional[int] = None, answer: O
         blocks.append(f'<div class="err">{error}</div>')
     status_block = "".join(blocks)
     result_block = f'<div class="card"><b>Réponse :</b>\n\n{answer}</div>' if answer else ""
-    return HTML_PAGE.replace("{question_value}", question_value).replace("{status_block}", status_block).replace("{result_block}", result_block)
+    return HTMLResponse(HTML_PAGE.replace("{question_value}", question_value).replace("{status_block}", status_block).replace("{result_block}", result_block))
 
 # ========== Helpers PDF/Chunks ==========
 def chunk_text(text: str, chunk_size: int = 1400, overlap: int = 320) -> List[str]:
@@ -188,8 +185,6 @@ async def home(request: Request, files: List[UploadFile] = File(None), question:
     # Vérification des clés API
     if not OPENAI_API_KEY:
         return page(error="OPENAI_API_KEY manquante.")
-    if OPENAI_API_KEY.startswith("sk-proj-") and not OPENAI_PROJECT:
-        return page(error="Clé `sk-proj-…` sans OPENAI_PROJECT=proj_xxx.")
 
     # Si méthode GET, afficher le formulaire vide
     if request.method == "GET":
