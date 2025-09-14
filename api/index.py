@@ -20,8 +20,18 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 OPENAI_EMBED_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
-# Configuration simplifiée du client OpenAI
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Configuration du client OpenAI sans arguments problématiques
+# Pour la version 1.3.0, on évite les paramètres qui causent des conflits
+try:
+    client = OpenAI(
+        api_key=OPENAI_API_KEY,
+        max_retries=2,
+        timeout=30.0
+    )
+except Exception as e:
+    logger.error(f"Erreur lors de l'initialisation du client OpenAI: {e}")
+    # Essai avec configuration minimale
+    client = OpenAI(api_key=OPENAI_API_KEY)
 
 app = FastAPI()
 
@@ -121,9 +131,22 @@ def embed_texts(texts: List[str], batch_size: int = 80, pause_s: float = 0.0) ->
     vecs: List[List[float]] = []
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        resp = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=batch)
-        for item in resp.data:
-            vecs.append(item.embedding)
+        try:
+            resp = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=batch)
+            for item in resp.data:
+                vecs.append(item.embedding)
+        except Exception as e:
+            logger.error(f"Erreur lors de la création des embeddings: {e}")
+            # En cas d'erreur, on peut essayer avec un batch plus petit
+            if batch_size > 1:
+                for single_text in batch:
+                    try:
+                        single_resp = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=[single_text])
+                        vecs.append(single_resp.data[0].embedding)
+                    except Exception as e2:
+                        logger.error(f"Erreur sur texte individuel: {e2}")
+                        # Ajouter un vecteur vide comme fallback
+                        vecs.append([0.0] * 1536)  # dimension par défaut pour text-embedding-3-small
         if pause_s > 0:
             time.sleep(pause_s)
     return vecs
@@ -131,8 +154,13 @@ def embed_texts(texts: List[str], batch_size: int = 80, pause_s: float = 0.0) ->
 def top_k_context(question: str, chunks: List[str], emb_matrix: List[List[float]], k: int = 4) -> List[str]:
     if not emb_matrix:
         return []
-    q_resp = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=[question])
-    q = q_resp.data[0].embedding
+    try:
+        q_resp = client.embeddings.create(model=OPENAI_EMBED_MODEL, input=[question])
+        q = q_resp.data[0].embedding
+    except Exception as e:
+        logger.error(f"Erreur lors de l'embedding de la question: {e}")
+        return chunks[:k] if len(chunks) >= k else chunks
+    
     qn = normalize(q)
     normed = [normalize(vec) for vec in emb_matrix]
     heap = []
@@ -144,7 +172,7 @@ def top_k_context(question: str, chunks: List[str], emb_matrix: List[List[float]
             if score > heap[0][0]:
                 heapq.heapreplace(heap, (score, idx))
     top = sorted(heap, key=lambda x: -x[0])
-    return [chunks[i] for _, i in top]
+    return [chunks[i] for _, i in top if i < len(chunks)]
 
 # ========== LLM ==========
 def answer_with_context(question: str, context_chunks: List[str]) -> str:
@@ -153,21 +181,21 @@ def answer_with_context(question: str, context_chunks: List[str]) -> str:
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": f"Contexte:\n{joined}\n\nQuestion: {question}"},
     ]
-    resp = client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=messages,
-        temperature=0.2,
-    )
     try:
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=0.2,
+        )
         return resp.choices[0].message.content or ""
     except Exception as e:
-        logger.exception("Erreur parsing LLM response: %s", e)
-        return ""
+        logger.exception("Erreur lors de l'appel au LLM: %s", e)
+        return f"Erreur lors de la génération de la réponse: {str(e)}"
 
 # ========== Routes ==========
 @app.get("/api/health")
 async def health():
-    return "OK"
+    return {"status": "OK", "api_key_configured": bool(OPENAI_API_KEY)}
 
 @app.get("/api/routes")
 async def routes():
@@ -184,7 +212,7 @@ MAX_TOTAL_BYTES = 4_900_000
 async def home(request: Request, files: List[UploadFile] = File(None), question: str = Form("")):
     # Vérification des clés API
     if not OPENAI_API_KEY:
-        return page(error="OPENAI_API_KEY manquante.")
+        return page(error="OPENAI_API_KEY manquante. Veuillez configurer la variable d'environnement.")
 
     # Si méthode GET, afficher le formulaire vide
     if request.method == "GET":
@@ -213,20 +241,32 @@ async def home(request: Request, files: List[UploadFile] = File(None), question:
             try:
                 reader = PdfReader(io.BytesIO(b))
                 for page in reader.pages:
-                    text += page.extract_text() or ""
+                    extracted = page.extract_text()
+                    if extracted:
+                        text += extracted + "\n"
             except Exception as e:
                 logger.exception("Erreur parsing PDF: %s", e)
+                return page(question_value=question, error=f"Erreur lors de la lecture du PDF: {str(e)}")
 
         chunks = chunk_text(text)
         if not chunks:
             return page(question_value=question, chunks_count=0, error="Aucun texte exploitable trouvé dans les PDF.")
 
         # Génération des embeddings et réponse
-        emb_matrix = embed_texts(chunks, batch_size=60)
-        ctx = top_k_context(question, chunks, emb_matrix, k=4)
-        ans = answer_with_context(question, ctx)
-        return page(question_value=question, chunks_count=len(chunks), answer=ans)
+        try:
+            emb_matrix = embed_texts(chunks, batch_size=60)
+            ctx = top_k_context(question, chunks, emb_matrix, k=4)
+            if not ctx:
+                return page(question_value=question, chunks_count=len(chunks), error="Impossible de trouver du contexte pertinent.")
+            ans = answer_with_context(question, ctx)
+            return page(question_value=question, chunks_count=len(chunks), answer=ans)
+        except Exception as e:
+            logger.error(f"Erreur lors du traitement: {e}")
+            return page(question_value=question, chunks_count=len(chunks), error=f"Erreur lors du traitement: {str(e)}")
 
     except Exception as e:
         logger.exception("Erreur serveur: %s", e)
-        return page(question_value=question, error=f"Erreur serveur : {e}")
+        return page(question_value=question, error=f"Erreur serveur : {str(e)}")
+
+# Point d'entrée pour Vercel
+app = app
